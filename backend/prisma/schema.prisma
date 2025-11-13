@@ -1,0 +1,351 @@
+// Prisma Schema for Multi-Tenant CRM Kanban
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================
+// SUPER ADMIN TABLES (public schema)
+// ============================================
+
+model SuperAdmin {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  password  String
+  name      String
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("super_admins")
+}
+
+enum TenantStatus {
+  TRIAL
+  ACTIVE
+  PAUSED
+  CANCELED
+}
+
+enum TenantPlan {
+  BASIC
+  PRO
+  ENTERPRISE
+}
+
+model Tenant {
+  id           String       @id @default(uuid())
+  companyName  String       @map("company_name")
+  email        String       @unique
+  phone        String?
+  status       TenantStatus @default(TRIAL)
+  plan         TenantPlan   @default(BASIC)
+
+  // Limits
+  maxUsers     Int          @default(5) @map("max_users")
+  maxLeads     Int          @default(1000) @map("max_leads")
+  maxPipelines Int          @default(5) @map("max_pipelines")
+
+  // Database schema name for this tenant
+  schemaName   String       @unique @map("schema_name")
+
+  // Customization (white-label)
+  primaryColor String?      @map("primary_color")
+  logoUrl      String?      @map("logo_url")
+
+  createdAt    DateTime     @default(now()) @map("created_at")
+  updatedAt    DateTime     @updatedAt @map("updated_at")
+
+  users        User[]
+  apiKeys      ApiKey[]
+
+  @@map("tenants")
+}
+
+// ============================================
+// TENANT-SPECIFIC TABLES (tenant schemas)
+// ============================================
+
+enum UserRole {
+  ADMIN
+  USER
+}
+
+model User {
+  id         String    @id @default(uuid())
+  tenantId   String    @map("tenant_id")
+  email      String
+  password   String?   // Null if user hasn't set password yet (pending invite)
+  name       String
+  role       UserRole  @default(USER)
+
+  // Permissions (for USER role)
+  canCreateLeads  Boolean @default(true) @map("can_create_leads")
+  canEditLeads    Boolean @default(true) @map("can_edit_leads")
+  canDeleteLeads  Boolean @default(false) @map("can_delete_leads")
+  canMoveLeads    Boolean @default(true) @map("can_move_leads")
+  viewAllLeads    Boolean @default(true) @map("view_all_leads")
+
+  // Invite token (for first access)
+  inviteToken     String?   @unique @map("invite_token")
+  inviteExpiresAt DateTime? @map("invite_expires_at")
+
+  // Password reset
+  resetToken      String?   @unique @map("reset_token")
+  resetExpiresAt  DateTime? @map("reset_expires_at")
+
+  lastLoginAt     DateTime? @map("last_login_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  tenant          Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  leadsCreated    Lead[]    @relation("LeadCreator")
+  leadsResponsible Lead[]   @relation("LeadResponsible")
+  activities      Activity[]
+  auditLogs       AuditLog[]
+
+  @@unique([tenantId, email])
+  @@index([tenantId])
+  @@index([email])
+  @@map("users")
+}
+
+model Column {
+  id          String   @id @default(uuid())
+  tenantId    String   @map("tenant_id")
+  name        String
+  color       String   @default("#6B7280") // Default gray
+  icon        String?  // Emoji or icon identifier
+  position    Int      // Order in the board
+  isWinColumn Boolean  @default(false) @map("is_win_column")
+  isLostColumn Boolean @default(false) @map("is_lost_column")
+
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  leads       Lead[]
+
+  @@unique([tenantId, position])
+  @@index([tenantId])
+  @@map("columns")
+}
+
+model Lead {
+  id              String   @id @default(uuid())
+  tenantId        String   @map("tenant_id")
+
+  // Basic info
+  name            String
+  email           String?
+  phone           String?
+  company         String?
+  position        String?  // Job position
+  estimatedValue  Decimal? @map("estimated_value") @db.Decimal(10, 2)
+
+  // Kanban position
+  columnId        String   @map("column_id")
+  positionInColumn Int     @map("position_in_column")
+
+  // Assignment and tracking
+  responsibleId   String?  @map("responsible_id")
+  tags            String[] @default([])
+  source          String?  // "webhook", "manual", "api", "import"
+
+  // Custom fields (JSON)
+  customFields    Json?    @map("custom_fields")
+
+  // Timestamps
+  firstInteraction      DateTime  @default(now()) @map("first_interaction")
+  lastInteraction       DateTime  @updatedAt @map("last_interaction")
+  enteredCurrentColumnAt DateTime @default(now()) @map("entered_current_column_at")
+
+  createdAt       DateTime @default(now()) @map("created_at")
+  createdBy       String   @map("created_by")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+  updatedBy       String?  @map("updated_by")
+
+  column          Column   @relation(fields: [columnId], references: [id], onDelete: Restrict)
+  creator         User     @relation("LeadCreator", fields: [createdBy], references: [id])
+  responsible     User?    @relation("LeadResponsible", fields: [responsibleId], references: [id])
+  activities      Activity[]
+  history         LeadHistory[]
+
+  @@index([tenantId])
+  @@index([columnId])
+  @@index([responsibleId])
+  @@index([createdAt])
+  @@map("leads")
+}
+
+enum ActivityType {
+  NOTE
+  CALL
+  EMAIL
+  MEETING
+  SYSTEM
+}
+
+model Activity {
+  id        String       @id @default(uuid())
+  tenantId  String       @map("tenant_id")
+  leadId    String       @map("lead_id")
+  userId    String?      @map("user_id") // Null for system activities
+  type      ActivityType @default(NOTE)
+  content   String       @db.Text
+
+  createdAt DateTime     @default(now()) @map("created_at")
+
+  lead      Lead         @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  user      User?        @relation(fields: [userId], references: [id])
+
+  @@index([leadId])
+  @@index([createdAt])
+  @@map("activities")
+}
+
+model LeadHistory {
+  id        String   @id @default(uuid())
+  tenantId  String   @map("tenant_id")
+  leadId    String   @map("lead_id")
+
+  action    String   // "created", "moved", "updated", "deleted"
+  fromData  Json?    @map("from_data")
+  toData    Json?    @map("to_data")
+  userId    String?  @map("user_id")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  lead      Lead     @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@index([leadId])
+  @@index([createdAt])
+  @@map("lead_history")
+}
+
+model CustomField {
+  id          String   @id @default(uuid())
+  tenantId    String   @map("tenant_id")
+  name        String
+  fieldType   String   @map("field_type") // "text", "textarea", "number", "currency", "date", "datetime", "select", "multiselect", "checkbox", "url", "email", "phone"
+  isRequired  Boolean  @default(false) @map("is_required")
+  defaultValue String? @map("default_value")
+  options     Json?    // For select/multiselect types
+  position    Int      // Display order
+
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+  @@map("custom_fields")
+}
+
+enum AutomationTrigger {
+  LEAD_CREATED
+  LEAD_MOVED
+  LEAD_UPDATED
+  FIELD_CHANGED
+  TAG_ADDED
+  NO_ACTIVITY
+  LEAD_ASSIGNED
+}
+
+enum AutomationAction {
+  MOVE_TO_COLUMN
+  ASSIGN_USER
+  ADD_TAG
+  REMOVE_TAG
+  UPDATE_FIELD
+  SEND_WEBHOOK
+  ADD_ACTIVITY
+  NOTIFY_USER
+}
+
+model Automation {
+  id          String             @id @default(uuid())
+  tenantId    String             @map("tenant_id")
+  name        String
+  isActive    Boolean            @default(true) @map("is_active")
+
+  // Trigger
+  trigger     AutomationTrigger
+  triggerConfig Json?            @map("trigger_config") // Additional trigger parameters
+
+  // Actions
+  actions     Json               // Array of actions to execute
+
+  createdAt   DateTime           @default(now()) @map("created_at")
+  updatedAt   DateTime           @updatedAt @map("updated_at")
+
+  @@index([tenantId])
+  @@map("automations")
+}
+
+model Webhook {
+  id          String   @id @default(uuid())
+  tenantId    String   @map("tenant_id")
+  name        String
+  url         String
+  secret      String   // For HMAC signature
+  events      String[] // ["lead.created", "lead.moved", etc.]
+  isActive    Boolean  @default(true) @map("is_active")
+
+  lastTriggeredAt DateTime? @map("last_triggered_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  @@index([tenantId])
+  @@map("webhooks")
+}
+
+model ApiKey {
+  id          String    @id @default(uuid())
+  tenantId    String    @map("tenant_id")
+  name        String    // User-friendly name
+  key         String    @unique // The actual API key (hashed)
+  prefix      String    // First few chars for identification (e.g., "sk_live_abc")
+  lastUsedAt  DateTime? @map("last_used_at")
+  lastUsedIp  String?   @map("last_used_ip")
+
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  tenant      Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@map("api_keys")
+}
+
+enum AuditAction {
+  LOGIN
+  LOGOUT
+  CREATE
+  UPDATE
+  DELETE
+  MOVE
+  API_CALL
+}
+
+model AuditLog {
+  id          String      @id @default(uuid())
+  tenantId    String      @map("tenant_id")
+  userId      String?     @map("user_id")
+  action      AuditAction
+  resource    String      // "lead", "column", "user", etc.
+  resourceId  String?     @map("resource_id")
+  ipAddress   String?     @map("ip_address")
+  userAgent   String?     @map("user_agent")
+  metadata    Json?
+
+  createdAt   DateTime    @default(now()) @map("created_at")
+
+  user        User?       @relation(fields: [userId], references: [id])
+
+  @@index([tenantId])
+  @@index([userId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
