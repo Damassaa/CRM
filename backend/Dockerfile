@@ -5,26 +5,29 @@ RUN apk add --no-cache openssl openssl-dev libc6-compat dos2unix
 
 WORKDIR /app
 
-# Copy package files
+# Copy package files first
 COPY package*.json ./
 COPY prisma ./prisma/
 
 # Install dependencies
 RUN npm install --legacy-peer-deps
 
-# Copy source code
-COPY . .
-
 # Generate Prisma Client
 RUN npx prisma generate
 
-# Fix line endings for shell scripts (convert CRLF to LF)
-RUN dos2unix /app/start.sh || sed -i 's/\r$//' /app/start.sh
-RUN dos2unix /app/wait-for-db.sh || sed -i 's/\r$//' /app/wait-for-db.sh
-RUN chmod +x /app/start.sh /app/wait-for-db.sh
+# Copy entrypoint script FIRST and fix its line endings
+COPY entrypoint.sh /entrypoint.sh
+RUN dos2unix /entrypoint.sh || sed -i 's/\r$//' /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+# Copy all source code
+COPY . .
 
 # Expose port
 EXPOSE 3001
 
-# Start command
+# Use entrypoint to fix scripts at runtime
+ENTRYPOINT ["/entrypoint.sh"]
+
+# Default command
 CMD ["sh", "/app/start.sh"]
